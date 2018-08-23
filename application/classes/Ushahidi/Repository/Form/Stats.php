@@ -52,7 +52,7 @@ class Ushahidi_Repository_Form_Stats extends Ushahidi_Repository implements
 	// SearchRepository
 	public function getSearchFields()
 	{
-		return ['form_id', 'contacts'];
+		return ['form_id', 'contacts', 'created_after', 'created_before'];
 	}
 
 	// Ushahidi_Repository
@@ -64,7 +64,25 @@ class Ushahidi_Repository_Form_Stats extends Ushahidi_Repository implements
 			$query->where('form_id', '=', $search->form_id);
 		}
 	}
-	public function getResponses($form_id)
+
+    /**
+     * @param $query
+     * @param $column
+     * @param null $before
+     * @param null $after
+     * @return mixed
+     */
+	private function betweenDates($query, $column, $before_dt = null, $after_dt = null) {
+        if ($before_dt && $after_dt) {
+            $query->where($column, 'BETWEEN', [strtotime($after_dt), strtotime($before_dt)]);
+        } else if ($before_dt) {
+            $query->where($column, '<=', strtotime($before_dt));
+        } else if ($after_dt) {
+            $query->where($column, '>=', strtotime($after_dt));
+        }
+        return $query;
+    }
+	public function getResponses($form_id, $created_after, $created_before)
 	{
 		$where = array(
 			'posts.form_id' => $form_id,
@@ -74,19 +92,24 @@ class Ushahidi_Repository_Form_Stats extends Ushahidi_Repository implements
 				Entity\TargetedSurveyState::PENDING_RESPONSE,
 				Entity\TargetedSurveyState::SURVEY_FINISHED,
 			)
-		);
-		$query = $this->selectQuery($where)
-			->resetSelect()
-			->select([DB::expr('COUNT(messages.id)'), 'total'])
-			->join('targeted_survey_state', 'INNER')
-				->on('contacts.id', '=', 'targeted_survey_state.contact_id')
-				->join('posts', 'INNER')
-				->on('posts.id', '=', 'targeted_survey_state.post_id')
-				->join('messages')
-				->on('messages.post_id', '=', 'targeted_survey_state.post_id');
-		return $query
-			->execute($this->db)
-			->get('total');
+        );
+        $query = $this->selectQuery($where);
+
+        $query = $this->betweenDates($query,'posts.created', $created_before, $created_after);
+
+        $query
+            ->resetSelect()
+            ->select([DB::expr('COUNT(messages.id)'), 'total']);
+        $query
+            ->join('targeted_survey_state', 'INNER')
+                ->on('contacts.id', '=', 'targeted_survey_state.contact_id')
+                ->join('posts', 'INNER')
+                ->on('posts.id', '=', 'targeted_survey_state.post_id')
+                ->join('messages')
+                ->on('messages.post_id', '=', 'targeted_survey_state.post_id');
+        return $query
+            ->execute($this->db)
+            ->get('total');
 	}
 
 	/**
@@ -168,7 +191,7 @@ class Ushahidi_Repository_Form_Stats extends Ushahidi_Repository implements
 	 * @param $form_id
 	 * @return array
 	 */
-	public function countOutgoingMessages($form_id)
+	public function countOutgoingMessages($form_id, $created_after, $created_before)
 	{
 		$query = $this->selectQuery()
 			->reset()
@@ -176,8 +199,9 @@ class Ushahidi_Repository_Form_Stats extends Ushahidi_Repository implements
 			->select(DB::expr('count(messages.status) as total, messages.status'))
 			->where('post_id', 'IN', DB::expr('(select post_id FROM targeted_survey_state WHERE form_id ='.$form_id.')'))
 			->where('direction', '=', 'outgoing')
-			->group_by('status');
-		$result = $query
+            ->group_by('status');
+        $query = $this->betweenDates($query,'created', $created_before, $created_after);
+        $result = $query
 			->execute($this->db);
 		$ret = ['pending' => 0, 'sent' => 0];
 		foreach( $result->as_array()  as $item ) {
@@ -219,7 +243,7 @@ class Ushahidi_Repository_Form_Stats extends Ushahidi_Repository implements
 	 * @param int $form_id
 	 * @return bool
 	 */
-	public function getRecipients($form_id)
+	public function getRecipients($form_id, $created_after, $created_before)
 	{
 		$where = array(
 			'posts.form_id' => $form_id,
@@ -231,12 +255,50 @@ class Ushahidi_Repository_Form_Stats extends Ushahidi_Repository implements
 		);
 		$query = $this->selectQuery($where)
 			->resetSelect()
-			->select([DB::expr('COUNT(distinct contact_id)'), 'total']);
-		$query = $this->targetedSurveyStateJoin($query);
+            ->select([DB::expr('COUNT(contacts.id)'), 'total']);
+
+        $query = $this->targetedSurveyStateJoin($query);
+        if ($created_after || $created_before) {
+            $query
+                ->join('messages', 'INNER')
+                ->on('messages.contact_id', '=', 'contacts.id')
+                ->where('messages.direction', '=', 'outgoing');
+            $query = $this->betweenDates($query,'messages.created', $created_before, $created_after);
+        }
 		return $query
 			->execute($this->db)
 			->get('total');
 	}
+
+    /**
+     * @param $query
+     * @param int $form_id
+     * @param string $created_after
+     * @param string $created_before
+     * @param $result
+     * Count of Unique Responders to Targeted Survey
+     * @return array
+     */
+    public function getResponseRecipients($form_id, $created_after, $created_before)
+    {
+        
+        $query = DB::select()
+            ->from('posts')
+            ->where('form_id', '=', $form_id);
+
+        $query = $this->betweenDates($query,'created', $created_before, $created_after);
+
+        $query = DB::select([DB::expr('COUNT(contact_id)'), 'total'])
+            ->distinct(true)
+            ->from([$query,'targeted_posts'])
+            ->join('messages', 'INNER')
+            ->on('messages.post_id', '=', 'targeted_posts.id')
+            ->where('messages.direction','=', 'incoming');
+
+        return $query
+            ->execute($this->db)
+            ->get('total');
+    }
 
 	/**
 	 * @param $query
@@ -248,5 +310,76 @@ class Ushahidi_Repository_Form_Stats extends Ushahidi_Repository implements
 			->on('contacts.id', '=', 'targeted_survey_state.contact_id')
 			->join('posts', 'INNER')
 			->on('posts.id', '=', 'targeted_survey_state.post_id');
-	}
+    }
+    
+    public function getSurveyType($form_id)
+    {
+        $query = DB::select('targeted_survey')
+        ->from('forms')
+        ->where('id', '=', $form_id);
+        $results = $query->execute($this->db);
+        return $results->as_array();
+    }
+
+    public function getPostCountByDataSource($form_id, $created_after, $created_before)
+    {
+        if ($created_after) {
+            $created_after = strtotime($created_after);
+        }
+        if ($created_before) {
+            $created_before = strtotime($created_before);
+        }
+        $dataSourceCounts = $this->queryByDataSource($form_id, $created_after, $created_before);
+        $result = [
+            'sms' => $dataSourceCounts['sms'],
+            'email' => $dataSourceCounts['email'],
+            'twitter' => $dataSourceCounts['twitter'],
+            'web' => $this->queryForWeb($form_id, $created_after, $created_before),
+        ];
+        $result['all'] = $result['web'] + $result['email'] + $result['twitter'] + $result['sms'];
+        return $result;
+    }
+
+    private function queryByDataSource($form_id, $created_after, $created_before)
+    {
+        $query = DB::select('messages.type', [DB::expr('COUNT(messages.id)'), 'total'])
+            ->from('posts')
+            ->join('messages', 'INNER')
+            ->on('messages.post_id', '=', 'posts.id')
+            ->where('posts.form_id', '=', $form_id)
+            ->group_by('messages.type');
+
+        $query = $this->betweenDates($query,'messages.created', $created_before, $created_after);
+
+        $result = $query
+            ->execute($this->db);
+
+        $ret = ['sms' => 0, 'email' => 0, 'twitter' => 0];
+        foreach ($result->as_array() as $item) {
+            if ($item['type'] === 'sms') {
+                $ret['sms'] = $item['total'];
+            } elseif ($item['type'] === 'email') {
+                $ret['email'] = $item['total'];
+            } elseif ($item['type'] === 'twitter') {
+                $ret['twitter'] = $item['total'];
+            }
+        }
+
+        return $ret;
+    }
+
+    private function queryForWeb($form_id, $created_after, $created_before)
+    {
+        $query = DB::select([DB::expr('COUNT(posts.id)'), 'total'])
+            ->from('posts')
+            ->join('messages', 'LEFT')
+            ->on('messages.post_id', '=', 'posts.id')
+            ->where('messages.post_id', 'is', null)
+            ->where('posts.form_id', '=', $form_id);
+        $query = $this->betweenDates($query,'posts.created', $created_before, $created_after);
+        $query->and_where('posts.type', '=', 'report');
+        return $query
+            ->execute($this->db)
+            ->get('total');
+    }
 }
